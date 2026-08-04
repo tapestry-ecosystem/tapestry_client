@@ -285,6 +285,7 @@ class TapestryClient:
         *,
         user_access_token: str,
         app_slug: str,
+        consent: bool = False,
     ) -> DelegationToken:
         """Mint a delegation token for an app on behalf of a logged-in user.
 
@@ -292,12 +293,20 @@ class TapestryClient:
         Tapestry JWT (not the service token). It's primarily useful for
         test harnesses, hello-apps, and internal tooling where the user flow
         is driven outside a browser.
+
+        Args:
+            user_access_token: The user's Tapestry access token.
+            app_slug: The registered app slug to delegate to.
+            consent: Whether the user explicitly consents to delegating to
+                this app. Required on the first delegation for a user/app
+                pair; subsequent delegations can omit it.
         """
 
         response = await self._request(
             "POST",
             f"/api/v1/apps/{app_slug}/delegate",
             headers={"Authorization": f"Bearer {user_access_token}"},
+            json_body={"consent": consent},
         )
         return DelegationToken.model_validate(self._unwrap(response))
 
