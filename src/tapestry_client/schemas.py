@@ -22,6 +22,12 @@ class IdentityMembership(BaseModel):
     role: str
 
 
+class ServiceTokenStatus(BaseModel):
+    app_id: uuid.UUID
+    app_slug: str
+    expires_at: datetime
+
+
 class IdentityContext(BaseModel):
     user_id: uuid.UUID
     email: str
