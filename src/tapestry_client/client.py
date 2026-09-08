@@ -9,14 +9,19 @@ because they're scoped to a specific user session.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
 import httpx
 
+from tapestry_client.credentials import ServiceTokenStore
 from tapestry_client.exceptions import (
     TapestryAuthError,
     TapestryClientError,
@@ -42,6 +47,7 @@ from tapestry_client.schemas import (
     PermissionCheck,
     RelationshipRef,
     ServiceTokenRefresh,
+    ServiceTokenStatus,
     SubscriptionCreateResponse,
     SubscriptionResponse,
     UserProfile,
@@ -85,6 +91,8 @@ class TapestryClient:
         transport: httpx.AsyncClient | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
         on_token_refresh: TokenRefreshCallback | None = None,
+        service_token_file: Path | str | None = None,
+        service_token_refresh_window: float = _REFRESH_WINDOW_SECONDS,
     ) -> None:
         if transport is None:
             if base_url is None:
@@ -94,9 +102,43 @@ class TapestryClient:
         else:
             self._http = transport
             self._owns_transport = False
+        self._refresh_window = service_token_refresh_window
         self._service_token = service_token
         self._service_token_expires_at: datetime | None = None
         self._on_token_refresh = on_token_refresh
+        self._refresh_lock = asyncio.Lock()
+        self._token_store = (
+            ServiceTokenStore(
+                Path(service_token_file), origin=str(self._http.base_url), seed=service_token
+            )
+            if service_token_file is not None
+            else None
+        )
+        self._pending_refresh: ServiceTokenRefresh | None = None
+        self._maintenance_task: asyncio.Task[None] | None = None
+        self._load_stored_token()
+
+    def _load_stored_token(self) -> None:
+        if self._token_store is not None and self._pending_refresh is None:
+            record = self._token_store.load()
+            if record is not None:
+                self._service_token = record.token.get_secret_value()
+                self._service_token_expires_at = record.expires_at
+
+    def start_service_token_maintenance(self) -> None:
+        """Renew durable service credentials while the app is idle as well as active."""
+        if self._token_store is not None and self._service_token and self._maintenance_task is None:
+            self._maintenance_task = asyncio.create_task(self._maintain_service_token())
+
+    async def _maintain_service_token(self) -> None:
+        while True:
+            try:
+                await self.maybe_refresh_service_token(window_seconds=self._refresh_window)
+            except TapestryClientError as exc:
+                logging.getLogger(__name__).warning(
+                    "Platform renewal failed (%s)", type(exc).__name__
+                )
+            await asyncio.sleep(60)
 
     # ------------------------------------------------------------------
     # Context management
@@ -116,6 +158,11 @@ class TapestryClient:
     async def aclose(self) -> None:
         """Close the underlying HTTP transport if the client owns it."""
 
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._maintenance_task
+            self._maintenance_task = None
         if self._owns_transport:
             await self._http.aclose()
 
@@ -157,6 +204,13 @@ class TapestryClient:
         json_body: dict[str, Any] | None = None,
         params: dict[str, str] | None = None,
     ) -> httpx.Response:
+        if "X-Service-Token" in headers:
+            if self._token_store is not None and path not in (
+                "/platform/v1/apps/token",
+                "/platform/v1/apps/token/refresh",
+            ):
+                await self.maybe_refresh_service_token(window_seconds=self._refresh_window)
+            headers = {**headers, "X-Service-Token": self._service_token}
         try:
             response = await self._http.request(
                 method,
@@ -244,14 +298,71 @@ class TapestryClient:
         invokes ``on_token_refresh`` if configured.
         """
 
+        result = await self._refresh(force=True, window_seconds=_REFRESH_WINDOW_SECONDS)
+        assert result is not None
+        return result
+
+    async def service_token_status(self) -> ServiceTokenStatus:
+        """Validate the current app credential without renewing it."""
+        self._load_stored_token()
         response = await self._request(
-            "POST",
-            "/platform/v1/apps/token/refresh",
-            headers=self._service_headers(),
+            "GET", "/platform/v1/apps/token", headers=self._service_headers()
         )
-        refreshed = ServiceTokenRefresh.model_validate(self._unwrap(response))
+        return ServiceTokenStatus.model_validate(self._unwrap(response))
+
+    async def _refresh(self, *, force: bool, window_seconds: float) -> ServiceTokenRefresh | None:
+        # Finish receiving and persisting an issued replacement before shutdown.
+        operation = asyncio.create_task(
+            self._refresh_serialized(force=force, window_seconds=window_seconds)
+        )
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            try:
+                await operation
+            finally:
+                raise
+
+    async def _refresh_serialized(
+        self, *, force: bool, window_seconds: float
+    ) -> ServiceTokenRefresh | None:
+        async with self._refresh_lock:
+            if self._token_store is None:
+                return await self._refresh_locked(force=force, window_seconds=window_seconds)
+            async with self._token_store.locked():
+                if self._pending_refresh is not None:
+                    self._persist_refresh(self._pending_refresh)
+                self._load_stored_token()
+                return await self._refresh_locked(force=force, window_seconds=window_seconds)
+
+    def _persist_refresh(self, refreshed: ServiceTokenRefresh) -> None:
+        if self._token_store is not None:
+            self._pending_refresh = refreshed
+            self._token_store.save(refreshed.service_token, refreshed.expires_at)
         self._service_token = refreshed.service_token
         self._service_token_expires_at = refreshed.expires_at
+        self._pending_refresh = None
+
+    async def _refresh_locked(
+        self, *, force: bool, window_seconds: float
+    ) -> ServiceTokenRefresh | None:
+        expires_at = self._service_token_expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if (
+            not force
+            and expires_at is not None
+            and (expires_at - datetime.now(UTC)).total_seconds() > window_seconds
+        ):
+            return None
+        if self._token_store is not None:
+            # Verify durable storage before asking the server to supersede a credential.
+            self._token_store.save(self._service_token, self._service_token_expires_at)
+        response = await self._request(
+            "POST", "/platform/v1/apps/token/refresh", headers=self._service_headers()
+        )
+        refreshed = ServiceTokenRefresh.model_validate(self._unwrap(response))
+        self._persist_refresh(refreshed)
         if self._on_token_refresh is not None:
             await self._on_token_refresh(refreshed)
         return refreshed
@@ -264,17 +375,11 @@ class TapestryClient:
         """Refresh the service token if it is within ``window_seconds`` of expiry.
 
         Returns the refresh result when a rotation happens, otherwise ``None``.
-        Expiry is only known after the first refresh, so initial calls will
-        always rotate to establish the clock.
+        Expiry is loaded from durable storage or established by the first refresh
+        request. The server can return a no-op while the credential is still fresh.
         """
 
-        expires_at = self._service_token_expires_at
-        if expires_at is None:
-            return await self.refresh_service_token()
-        remaining = (expires_at - datetime.now(UTC)).total_seconds()
-        if remaining <= window_seconds:
-            return await self.refresh_service_token()
-        return None
+        return await self._refresh(force=False, window_seconds=window_seconds)
 
     # ------------------------------------------------------------------
     # Delegation-token minting (user-authenticated helper)

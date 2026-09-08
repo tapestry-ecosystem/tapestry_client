@@ -4,10 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tapestry-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reference async client library for the Tapestry platform contracts."
 requires-python = ">=3.13"
 dependencies = [
+    "filelock>=3.16.0",
     "httpx>=0.28.0",
     "pydantic>=2.9.0",
 ]
