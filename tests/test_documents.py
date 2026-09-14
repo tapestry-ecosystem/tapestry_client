@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import uuid
+
+import httpx
+import pytest
+
+from tapestry_client import TapestryClient
+from tapestry_client.exceptions import TapestryNotFoundError
+
+ORG = uuid.UUID("a0000000-0000-4000-8000-000000000001")
+DOC = uuid.UUID("d0000000-0000-4000-8000-000000000002")
+JAR = uuid.UUID("b0000000-0000-4000-8000-000000000003")
+DATA = {
+    "id": str(DOC),
+    "organization_id": str(ORG),
+    "jar_id": str(JAR),
+    "title": "Legal invoice",
+    "status": "ready",
+    "document_kind": "invoice",
+    "categories": ["legal"],
+    "classification_source": "human",
+    "classification_review_required": False,
+    "created_at": "2026-09-12T12:00:00Z",
+    "updated_at": "2026-09-12T12:00:00Z",
+}
+
+
+async def test_document_page_keeps_opaque_cursor_filters_and_auth_in_headers() -> None:
+    cursor = "a+/=?&encoded"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/platform/v1/documents"
+        assert request.url.params["cursor"] == cursor
+        assert request.url.params.get_list("kind") == ["invoice", "receipt"]
+        assert request.url.params["organization_id"] == str(ORG)
+        assert request.url.params["jar_id"] == str(JAR)
+        assert request.url.params["category"] == "legal"
+        assert request.headers["X-Delegation-Token"] == "caller"
+        assert request.headers["X-Service-Token"] == "service"
+        assert "caller" not in str(request.url)
+        return httpx.Response(200, json={"data": [DATA], "meta": {"next_cursor": cursor}})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        page = await client.list_documents(
+            organization_id=ORG,
+            jar_id=JAR,
+            kinds=["invoice", "receipt"],
+            category="legal",
+            cursor=cursor,
+            delegation_token="caller",
+        )
+    assert page.next_cursor == cursor
+    assert page.items[0].id == DOC
+    assert not hasattr(page.items[0], "extracted_text")
+
+
+async def test_detail_and_human_classification_use_current_request_credentials() -> None:
+    calls = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.method == "PATCH":
+            assert request.url.path == f"/platform/v1/documents/{DOC}/classification"
+            assert b'"categories":["legal"]' in request.content
+        return httpx.Response(200, json={"data": {**DATA, "extracted_text": "Source evidence"}})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        detail = await client.get_document(DOC, delegation_token="first")
+        saved = await client.update_document_classification(
+            DOC, document_kind="invoice", categories=["legal"], delegation_token="second"
+        )
+    assert detail.extracted_text == "Source evidence" and saved.id == DOC
+    assert [r.headers["X-Delegation-Token"] for r in calls] == ["first", "second"]
+
+
+async def test_document_revocation_uses_standard_sdk_errors() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                404, json={"error": {"code": "not_found", "message": "Document unavailable"}}
+            )
+        ),
+        base_url="http://test",
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        with pytest.raises(TapestryNotFoundError):
+            await client.get_document(DOC, delegation_token="revoked")
