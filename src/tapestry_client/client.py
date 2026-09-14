@@ -18,10 +18,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import quote, urlencode
 
 import httpx
 
 from tapestry_client.credentials import ServiceTokenStore
+from tapestry_client.documents import DocumentDetail, DocumentPage, DocumentSummary
 from tapestry_client.exceptions import (
     TapestryAuthError,
     TapestryClientError,
@@ -31,6 +33,8 @@ from tapestry_client.exceptions import (
     TapestryServerError,
     TapestryValidationError,
 )
+from tapestry_client.mail import MailClientMixin
+from tapestry_client.purchases import PurchaseClientMixin
 from tapestry_client.schemas import (
     AccessibleJar,
     DelegationToken,
@@ -64,7 +68,7 @@ TokenRefreshCallback = Callable[[ServiceTokenRefresh], Awaitable[None]]
 """Signature for the optional persistence hook invoked after a refresh."""
 
 
-class TapestryClient:
+class TapestryClient(MailClientMixin, PurchaseClientMixin):
     """Thin async client over the Tapestry platform contracts.
 
     Args:
@@ -548,6 +552,50 @@ class TapestryClient:
         )
         return EntityRef.model_validate(self._unwrap(response))
 
+    async def get_entity_record(
+        self,
+        record_key: str,
+        *,
+        organization_id: uuid.UUID,
+        delegation_token: str,
+    ) -> EntityRef:
+        """Resolve a stable source key to its current, readable canonical entity."""
+        response = await self._request(
+            "GET",
+            f"/platform/v1/entity-records/{quote(record_key, safe='')}",
+            headers=self._auth_headers(delegation_token),
+            params={"organization_id": str(organization_id)},
+        )
+        return EntityRef.model_validate(self._unwrap(response)["entity"])
+
+    async def put_entity_record(
+        self,
+        record_key: str,
+        *,
+        entity_type_slug: str,
+        jar_id: uuid.UUID,
+        name: str,
+        source_updated_at: datetime,
+        fields: dict[str, Any],
+        summary: str | None = None,
+        delegation_token: str,
+    ) -> EntityRef:
+        """Publish an app-owned record without changing its identity on retries."""
+        response = await self._request(
+            "PUT",
+            f"/platform/v1/entity-records/{quote(record_key, safe='')}",
+            headers=self._auth_headers(delegation_token),
+            json_body={
+                "jar_id": str(jar_id),
+                "entity_type_slug": entity_type_slug,
+                "name": name,
+                "summary": summary,
+                "fields": fields,
+                "source_updated_at": source_updated_at.isoformat(),
+            },
+        )
+        return EntityRef.model_validate(self._unwrap(response)["entity"])
+
     async def get_entity(
         self,
         entity_id: uuid.UUID,
@@ -913,3 +961,71 @@ class TapestryClient:
             f"/platform/v1/subscriptions/{subscription_id}",
             headers=self._auth_headers(delegation_token),
         )
+
+    async def list_documents(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        delegation_token: str,
+        jar_id: uuid.UUID | None = None,
+        kinds: list[str] | None = None,
+        category: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        status: str = "ready",
+    ) -> DocumentPage:
+        """Page current authorized document metadata without retrieving OCR text.
+
+        Cursors are opaque and reusable only with the same filters. Each call
+        rechecks the current user's household and Jar permissions in Tapestry.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("Document page limit must be between 1 and 100")
+        query: list[tuple[str, str]] = [
+            ("organization_id", str(organization_id)),
+            ("limit", str(limit)),
+            ("status", status),
+        ]
+        if jar_id is not None:
+            query.append(("jar_id", str(jar_id)))
+        query.extend(("kind", kind) for kind in kinds or [])
+        if category is not None:
+            query.append(("category", category))
+        if cursor is not None:
+            query.append(("cursor", cursor))
+        response = await self._request(
+            "GET",
+            "/platform/v1/documents?" + urlencode(query),
+            headers=self._auth_headers(delegation_token),
+        )
+        items = [DocumentSummary.model_validate(item) for item in self._unwrap(response)]
+        metadata = response.json().get("meta") or {}
+        return DocumentPage(items=items, next_cursor=metadata.get("next_cursor"))
+
+    async def get_document(
+        self, document_id: uuid.UUID, *, delegation_token: str
+    ) -> DocumentDetail:
+        """Read a document's source text under its current Jar permissions."""
+        response = await self._request(
+            "GET",
+            f"/platform/v1/documents/{document_id}",
+            headers=self._auth_headers(delegation_token),
+        )
+        return DocumentDetail.model_validate(self._unwrap(response))
+
+    async def update_document_classification(
+        self,
+        document_id: uuid.UUID,
+        *,
+        document_kind: str | None,
+        categories: list[str],
+        delegation_token: str,
+    ) -> DocumentDetail:
+        """Save explicit human classification; requires current Jar write access."""
+        response = await self._request(
+            "PATCH",
+            f"/platform/v1/documents/{document_id}/classification",
+            headers=self._auth_headers(delegation_token),
+            json_body={"document_kind": document_kind, "categories": categories},
+        )
+        return DocumentDetail.model_validate(self._unwrap(response))

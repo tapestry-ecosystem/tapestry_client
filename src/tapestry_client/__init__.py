@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from tapestry_client.cache import TTLCache
 from tapestry_client.client import TapestryClient
+from tapestry_client.documents import DocumentDetail, DocumentPage, DocumentSummary
 from tapestry_client.exceptions import (
     TapestryAuthError,
     TapestryClientError,
@@ -58,6 +59,9 @@ from tapestry_client.schemas import (
 __all__ = [
     "AccessibleJar",
     "DelegationToken",
+    "DocumentDetail",
+    "DocumentPage",
+    "DocumentSummary",
     "EmittedEvent",
     "EntityFieldUpdateResult",
     "EntityFieldValue",
