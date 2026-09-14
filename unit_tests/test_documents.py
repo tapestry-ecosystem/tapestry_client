@@ -94,3 +94,61 @@ async def test_document_revocation_uses_standard_sdk_errors() -> None:
         client = TapestryClient(service_token="service", transport=http)
         with pytest.raises(TapestryNotFoundError):
             await client.get_document(DOC, delegation_token="revoked")
+
+
+async def test_declared_discovery_and_custom_kind_metadata() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Delegation-Token"] == "caller"
+        if request.url.path.endswith("/requirements"):
+            return httpx.Response(200, json={"data": {"kinds": ["invoice"], "tags": []}})
+        if request.url.path.endswith("/kinds"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "value": "custom.warranty",
+                            "label": "Warranty",
+                            "description": "Coverage and exclusions",
+                            "ai_selectable": True,
+                            "allows_custom_label": False,
+                        }
+                    ]
+                },
+            )
+        assert request.url.path == "/platform/v1/documents/discovery"
+        assert request.url.params["jar_id"] == str(JAR)
+        assert request.url.params["cursor"] == "opaque+/="
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        **DATA,
+                        "document_kind": "other",
+                        "other_document_kind": "Packing slip",
+                        "jar_id": None,
+                    }
+                ],
+                "meta": {},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        assert (await client.get_document_requirements(delegation_token="caller")).kinds == [
+            "invoice"
+        ]
+        assert (await client.list_document_kinds(delegation_token="caller"))[
+            0
+        ].value == "custom.warranty"
+        page = await client.discover_documents(
+            organization_id=ORG, jar_id=JAR, cursor="opaque+/=", delegation_token="caller"
+        )
+        assert page.items[0].other_document_kind == "Packing slip" and page.items[0].jar_id is None
+        with pytest.raises(ValueError):
+            await client.discover_documents(
+                organization_id=ORG, delegation_token="caller", limit=101
+            )
