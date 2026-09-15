@@ -10,6 +10,8 @@ import pytest
 
 from tapestry_client import TapestryClient
 
+pytestmark = [pytest.mark.unit, pytest.mark.isolated_unit]
+
 
 @pytest.mark.asyncio
 async def test_mail_reads_strip_secrets_and_write_preserves_password() -> None:

@@ -33,6 +33,6 @@ Business handlers must remain idempotent for legitimate retries.
 See Tapestry's `docs/platform/authentication.md` for headers, recovery and rollout,
 and private apps' `deploy/AUTHENTICATION.md` for the Stash/Budtender event bridge.
 
-Development: `uv sync --extra dev`, `uv run pytest`, `uv run ruff check .`,
-`uv run ruff format --check .`, `uv run mypy src tests`. Platform compatibility is
+Development: use the locked install and both test layers described in
+[test suites](docs/test-suites.md), then run Ruff and mypy. Platform compatibility is
 also exercised by Tapestry's `tests/test_tapestry_client` and companion compound tests.
