@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -8,6 +10,8 @@ import pytest
 from pydantic import SecretStr
 
 from tapestry_client.webhooks import WebhookVerificationError, verify_webhook
+
+pytestmark = [pytest.mark.unit, pytest.mark.isolated_unit]
 
 
 class VerificationArgs(TypedDict):

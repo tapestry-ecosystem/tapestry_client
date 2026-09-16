@@ -13,15 +13,62 @@ jobs:
       matrix:
         python-version: ["3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          version: "latest"
+          persist-credentials: false
+      - id: uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - name: Sync
-        run: uv sync --extra dev
+        env:
+          CI_UV_CACHE_HIT: ${{ steps.uv.outputs.cache-hit }}
+          CI_UV_VERSION: ${{ steps.uv.outputs.uv-version }}
+        run: |
+          install_started=$SECONDS
+          uv sync --frozen --extra dev
+          echo "CI_INSTALL_SECONDS=$((SECONDS - install_started))" >> "$GITHUB_ENV"
+          echo "CI_UV_CACHE_HIT=$CI_UV_CACHE_HIT" >> "$GITHUB_ENV"
+          echo "CI_UV_VERSION=$CI_UV_VERSION" >> "$GITHUB_ENV"
       - name: Lint
-        run: uv run ruff check . && uv run ruff format --check
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check
       - name: Type check
-        run: uv run mypy src tests
-      - name: Test
-        run: uv run pytest --no-cov -v
+        run: uv run --frozen mypy src tests unit_tests tools
+      - name: Full test inventory
+        run: >-
+          uv run --frozen pytest -p tools.ci.pytest_report --collect-only --no-cov -m ''
+          --suite-lane inventory --suite-report artifacts/inventory.json
+      - name: Isolated unit tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          COVERAGE_FILE: artifacts/coverage.data
+        run: >-
+          uv run --frozen pytest -c pytest-unit.ini
+          -p pytest_asyncio.plugin -p pytest_cov.plugin -p tools.ci.pytest_report
+          --suite-lane unit --suite-report artifacts/unit.json
+          --junitxml=artifacts/unit.xml --durations=20
+          --cov=tapestry_client --cov-config=pyproject.toml --cov-report=
+      - name: Credential and test-runner integration
+        env:
+          COVERAGE_FILE: artifacts/coverage.data
+        run: >-
+          uv run --frozen pytest -p tools.ci.pytest_report
+          --suite-lane integration --suite-report artifacts/integration.json
+          --junitxml=artifacts/integration.xml --durations=20
+          --cov-append --cov-report=term-missing --cov-report=json:artifacts/coverage.json
+      - name: Audit complete and disjoint ownership
+        if: always()
+        run: >-
+          python tools/ci/audit_test_reports.py artifacts/inventory.json
+          artifacts/unit.json artifacts/integration.json
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-test-evidence
+          path: artifacts/
+          retention-days: 14
+          if-no-files-found: error

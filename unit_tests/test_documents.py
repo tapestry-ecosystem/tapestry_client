@@ -8,6 +8,8 @@ import pytest
 from tapestry_client import TapestryClient
 from tapestry_client.exceptions import TapestryNotFoundError
 
+pytestmark = [pytest.mark.unit, pytest.mark.isolated_unit]
+
 ORG = uuid.UUID("a0000000-0000-4000-8000-000000000001")
 DOC = uuid.UUID("d0000000-0000-4000-8000-000000000002")
 JAR = uuid.UUID("b0000000-0000-4000-8000-000000000003")

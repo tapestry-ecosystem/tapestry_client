@@ -34,7 +34,7 @@ allow-direct-references = true
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "unit_tests", "tools"]
 target-version = "py313"
 
 [tool.ruff.lint]
@@ -51,10 +51,17 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["src"]
+pythonpath = ["src", "."]
+testpaths = ["tests", "unit_tests"]
+markers = [
+    "unit: isolated transport, schema, and webhook rules",
+    "isolated_unit: proven unit boundary without application or I/O dependencies",
+    "integration: real filesystem and runner components",
+]
 addopts = [
     "-ra",
     "--strict-markers",
+    "-m", "not isolated_unit",
     "--cov=tapestry_client",
     "--cov-report=term-missing",
 ]

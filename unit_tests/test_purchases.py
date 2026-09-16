@@ -11,6 +11,8 @@ from tapestry_client import TapestryClient
 from tapestry_client.exceptions import TapestryNotFoundError
 from tapestry_client.purchases import PurchaseData
 
+pytestmark = [pytest.mark.unit, pytest.mark.isolated_unit]
+
 DOC = uuid.UUID("d0000000-0000-4000-8000-000000000002")
 JOB = uuid.UUID("e0000000-0000-4000-8000-000000000003")
 
