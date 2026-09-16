@@ -60,7 +60,7 @@ class PurchaseLineItem(PurchaseModel):
 
 
 class PurchaseData(PurchaseModel):
-    document_type: Literal["receipt", "invoice", "unknown"] = "unknown"
+    document_type: Literal["receipt", "invoice", "order-confirmation", "unknown"] = "unknown"
     merchant: str | None = Field(default=None, max_length=255)
     document_number: str | None = Field(default=None, max_length=255)
     purchase_date: date | None = None
