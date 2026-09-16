@@ -12,6 +12,8 @@ from tapestry_client import TapestryClient
 from tapestry_client.credentials import CredentialStorageError, ServiceTokenStore
 from tapestry_client.exceptions import TapestryAuthError
 
+pytestmark = pytest.mark.integration
+
 
 class Issuer:
     def __init__(self) -> None:

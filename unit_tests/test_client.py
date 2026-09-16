@@ -8,6 +8,8 @@ import pytest
 from tapestry_client import TapestryClient
 from tapestry_client.exceptions import TapestryClientError
 
+pytestmark = [pytest.mark.unit, pytest.mark.isolated_unit]
+
 
 def test_client_requires_base_url_or_transport() -> None:
     with pytest.raises(ValueError, match="Either base_url or transport"):
