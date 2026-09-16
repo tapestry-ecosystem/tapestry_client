@@ -23,7 +23,13 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from tapestry_client.credentials import ServiceTokenStore
-from tapestry_client.documents import DocumentDetail, DocumentPage, DocumentSummary
+from tapestry_client.documents import (
+    DocumentDetail,
+    DocumentKindOption,
+    DocumentPage,
+    DocumentRequirements,
+    DocumentSummary,
+)
 from tapestry_client.exceptions import (
     TapestryAuthError,
     TapestryClientError,
@@ -1013,6 +1019,49 @@ class TapestryClient(MailClientMixin, PurchaseClientMixin):
         )
         return DocumentDetail.model_validate(self._unwrap(response))
 
+    async def get_document_requirements(self, *, delegation_token: str) -> DocumentRequirements:
+        """Return this app's registered kinds and tag recognition criteria."""
+        response = await self._request(
+            "GET",
+            "/platform/v1/documents/requirements",
+            headers=self._auth_headers(delegation_token),
+        )
+        return DocumentRequirements.model_validate(self._unwrap(response))
+
+    async def list_document_kinds(self, *, delegation_token: str) -> list[DocumentKindOption]:
+        """Read approved kinds, including custom recognition criteria."""
+        response = await self._request(
+            "GET", "/platform/v1/documents/kinds", headers=self._auth_headers(delegation_token)
+        )
+        return [DocumentKindOption.model_validate(item) for item in self._unwrap(response)]
+
+    async def discover_documents(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        delegation_token: str,
+        jar_id: uuid.UUID | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> DocumentPage:
+        """Match this app's registered requirements against current authorized metadata."""
+        if not 1 <= limit <= 100:
+            raise ValueError("Document page limit must be between 1 and 100")
+        query = {"organization_id": str(organization_id), "limit": str(limit)}
+        if jar_id is not None:
+            query["jar_id"] = str(jar_id)
+        if cursor is not None:
+            query["cursor"] = cursor
+        response = await self._request(
+            "GET",
+            "/platform/v1/documents/discovery?" + urlencode(query),
+            headers=self._auth_headers(delegation_token),
+        )
+        return DocumentPage(
+            items=[DocumentSummary.model_validate(item) for item in self._unwrap(response)],
+            next_cursor=(response.json().get("meta") or {}).get("next_cursor"),
+        )
+
     async def update_document_classification(
         self,
         document_id: uuid.UUID,
@@ -1020,12 +1069,21 @@ class TapestryClient(MailClientMixin, PurchaseClientMixin):
         document_kind: str | None,
         categories: list[str],
         delegation_token: str,
+        other_document_kind: str | None = None,
     ) -> DocumentDetail:
         """Save explicit human classification; requires current Jar write access."""
         response = await self._request(
             "PATCH",
             f"/platform/v1/documents/{document_id}/classification",
             headers=self._auth_headers(delegation_token),
-            json_body={"document_kind": document_kind, "categories": categories},
+            json_body={
+                "document_kind": document_kind,
+                "categories": categories,
+                **(
+                    {"other_document_kind": other_document_kind}
+                    if other_document_kind is not None
+                    else {}
+                ),
+            },
         )
         return DocumentDetail.model_validate(self._unwrap(response))

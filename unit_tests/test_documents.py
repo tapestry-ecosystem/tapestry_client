@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 import httpx
@@ -94,3 +95,104 @@ async def test_document_revocation_uses_standard_sdk_errors() -> None:
         client = TapestryClient(service_token="service", transport=http)
         with pytest.raises(TapestryNotFoundError):
             await client.get_document(DOC, delegation_token="revoked")
+
+
+async def test_declared_discovery_and_custom_kind_metadata() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Delegation-Token"] == "caller"
+        if request.url.path.endswith("/requirements"):
+            return httpx.Response(200, json={"data": {"kinds": ["invoice"], "tags": []}})
+        if request.url.path.endswith("/kinds"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "value": "custom.warranty",
+                            "label": "Warranty",
+                            "description": "Coverage and exclusions",
+                            "ai_selectable": True,
+                            "allows_custom_label": False,
+                        }
+                    ]
+                },
+            )
+        assert request.url.path == "/platform/v1/documents/discovery"
+        assert request.url.params["jar_id"] == str(JAR)
+        assert request.url.params["cursor"] == "opaque+/="
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        **DATA,
+                        "document_kind": "other",
+                        "other_document_kind": "Packing slip",
+                        "jar_id": None,
+                    }
+                ],
+                "meta": {},
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        assert (await client.get_document_requirements(delegation_token="caller")).kinds == [
+            "invoice"
+        ]
+        assert (await client.list_document_kinds(delegation_token="caller"))[
+            0
+        ].value == "custom.warranty"
+        page = await client.discover_documents(
+            organization_id=ORG, jar_id=JAR, cursor="opaque+/=", delegation_token="caller"
+        )
+        assert page.items[0].other_document_kind == "Packing slip" and page.items[0].jar_id is None
+        with pytest.raises(ValueError):
+            await client.discover_documents(
+                organization_id=ORG, delegation_token="caller", limit=101
+            )
+
+
+@pytest.mark.parametrize("custom_label", [None, "Packing slip"])
+async def test_custom_classification_preserves_optional_label(custom_label: str | None) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["document_kind"] == "other"
+        assert body["categories"] == ["shipping"]
+        assert request.headers["X-Delegation-Token"] == "current-user"
+        assert request.headers["X-Service-Token"] == "service"
+        if custom_label is None:
+            assert "other_document_kind" not in body
+        else:
+            assert body["other_document_kind"] == custom_label
+        return httpx.Response(200, json={"data": {**DATA, "other_document_kind": custom_label}})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        saved = await client.update_document_classification(
+            DOC,
+            document_kind="other",
+            categories=["shipping"],
+            delegation_token="current-user",
+            other_document_kind=custom_label,
+        )
+    assert saved.other_document_kind == custom_label
+
+
+@pytest.mark.parametrize("limit", [0, -1, 101])
+async def test_invalid_discovery_page_does_not_send_credentials(limit: int) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        pytest.fail("An invalid page limit must fail before sending a request")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://test"
+    ) as http:
+        client = TapestryClient(service_token="service", transport=http)
+        with pytest.raises(ValueError, match="between 1 and 100"):
+            await client.discover_documents(
+                organization_id=ORG, delegation_token="current-user", limit=limit
+            )
